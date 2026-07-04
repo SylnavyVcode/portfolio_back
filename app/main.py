@@ -8,7 +8,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
-from app.routers import auth
+from app.routers import admin, auth, blog
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
@@ -47,3 +47,5 @@ def health():
 
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(blog.router, prefix="/api/blog", tags=["blog"])
+app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
