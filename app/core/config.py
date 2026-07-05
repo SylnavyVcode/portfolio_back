@@ -22,12 +22,9 @@ class Settings(BaseSettings):
     email_sender_name: str = "Valmy Mabika"
     email_sender_address: str = ""
 
-    # Paiements (modules 4 et 6)
+    # Paiements
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
-    paypal_client_id: str = ""
-    paypal_client_secret: str = ""
-    paypal_environment: str = "sandbox"
     flutterwave_secret_key: str = ""
     flutterwave_webhook_hash: str = ""
 

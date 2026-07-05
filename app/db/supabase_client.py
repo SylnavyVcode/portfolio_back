@@ -23,3 +23,12 @@ def get_service_client() -> Client:
 def new_anon_client() -> Client:
     settings = get_settings()
     return create_client(settings.supabase_url, settings.supabase_anon_key)
+
+
+def get_user_email(user_id: str) -> str:
+    """Email d'un utilisateur (auth.users, via l'API admin). Vide si introuvable."""
+    try:
+        result = get_service_client().auth.admin.get_user_by_id(user_id)
+        return (result.user.email if result.user else "") or ""
+    except Exception:
+        return ""

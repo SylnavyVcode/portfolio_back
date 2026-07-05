@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from postgrest.exceptions import APIError
 
-from app.db.supabase_client import get_service_client
+from app.db.supabase_client import get_service_client, get_user_email
 from app.dependencies import CurrentUser, require_admin
+from app.services import email_service
 from app.routers.blog import DETAIL_COLUMNS, row_to_detail
 from app.routers.courses import (
     COURSE_DETAIL_COLUMNS,
@@ -421,6 +422,9 @@ def admin_validate_cash(order_id: str, admin: CurrentUser = Depends(require_admi
         raise HTTPException(status.HTTP_409_CONFLICT, f"Commande déjà traitée (statut : {order['status']})")
 
     fulfill_order(order, validated_by=admin.id, provider="cash")
+    email_service.send_cash_validated(
+        get_user_email(order["user_id"]), order_id, float(order.get("total_amount") or 0)
+    )
     return _admin_order_out(_get_admin_order(order_id))
 
 

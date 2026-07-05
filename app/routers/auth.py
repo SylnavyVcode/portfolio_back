@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.core.rate_limit import limiter
 from app.core.security import verify_supabase_jwt
 from app.db.supabase_client import get_service_client, new_anon_client
+from app.services import email_service
 from app.dependencies import CurrentUser, get_current_user
 from app.schemas.auth import (
     ChangePasswordRequest,
@@ -85,6 +86,8 @@ def register(request: Request, payload: RegisterRequest):
             raise HTTPException(status.HTTP_409_CONFLICT, "Un compte existe déjà avec cet email")
         logger.warning("Echec d'inscription: %s", exc.message)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Inscription impossible, vérifiez vos informations")
+
+    email_service.send_welcome(payload.email, payload.full_name)
 
     # Si la confirmation d'email est activée côté Supabase, session est None :
     # l'utilisateur doit cliquer le lien reçu avant de pouvoir se connecter.

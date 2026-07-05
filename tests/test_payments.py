@@ -97,6 +97,9 @@ def fake_db(monkeypatch):
         fake = TableAwareFake(tables)
         for module in ("payments", "admin", "cart", "courses", "enrollments"):
             monkeypatch.setattr(f"app.routers.{module}.get_service_client", lambda: fake)
+        # Évite tout appel réseau vers l'API admin Supabase (emails)
+        monkeypatch.setattr("app.routers.payments.get_user_email", lambda _: "client@test.com")
+        monkeypatch.setattr("app.routers.admin.get_user_email", lambda _: "client@test.com")
         return fake
 
     return install
@@ -123,13 +126,12 @@ def test_checkout_rejects_unknown_method(client, fake_db):
         app.dependency_overrides.clear()
 
 
-def test_checkout_not_implemented_methods(client, fake_db):
+def test_checkout_paypal_not_implemented(client, fake_db):
     fake_db({"cart_items": [cart_row()]})
     app = override_user(client, role="user")
     try:
-        for method in ("paypal", "mobile_money"):
-            response = client.post("/api/payments/checkout", json={"payment_method": method})
-            assert response.status_code == 501
+        response = client.post("/api/payments/checkout", json={"payment_method": "paypal"})
+        assert response.status_code == 501
     finally:
         app.dependency_overrides.clear()
 
@@ -262,3 +264,117 @@ def test_stripe_webhook_rejects_bad_signature(client, fake_db):
         headers={"stripe-signature": "t=1,v1=invalid"},
     )
     assert response.status_code == 400
+
+
+# ── Flutterwave (mobile money) ───────────────────────────────────────────────
+
+
+def _flutterwave_settings(monkeypatch):
+    from app.core.config import get_settings
+
+    base = get_settings()
+    stub = SimpleNamespace(
+        **{
+            **{name: getattr(base, name) for name in type(base).model_fields},
+            "flutterwave_secret_key": "FLWSECK_TEST-xyz",
+            "flutterwave_webhook_hash": "hash-secret",
+        }
+    )
+    monkeypatch.setattr("app.routers.payments.get_settings", lambda: stub)
+
+
+def test_checkout_mobile_money_unavailable_without_key(client, fake_db):
+    fake_db({"cart_items": [cart_row()]})
+    app = override_user(client, role="user")
+    try:
+        response = client.post("/api/payments/checkout", json={"payment_method": "mobile_money"})
+        assert response.status_code == 503
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_checkout_mobile_money_creates_flutterwave_payment(client, fake_db, monkeypatch):
+    fake = fake_db({"cart_items": [cart_row()], "orders": [], "order_items": [], "payments": []})
+    _flutterwave_settings(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.flutterwave_service.create_payment_link",
+        lambda **kwargs: "https://checkout.flutterwave.com/pay/test123",
+    )
+    app = override_user(client, role="user")
+    try:
+        response = client.post(
+            "/api/payments/checkout",
+            json={"payment_method": "mobile_money", "operator": "MTN Mobile Money", "phone_number": "061234567"},
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["redirect_url"] == "https://checkout.flutterwave.com/pay/test123"
+        assert body["order"]["status"] == "pending"
+        payment = fake.tables["payments"][0]
+        assert payment["provider"] == "flutterwave"
+        assert payment["currency"] == "XAF"
+        assert payment["amount"] == 45261  # 69 EUR au taux fixe CFA
+        assert payment["provider_reference"] == body["order"]["id"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_flutterwave_webhook_rejects_bad_hash(client, fake_db, monkeypatch):
+    fake_db({})
+    _flutterwave_settings(monkeypatch)
+    response = client.post(
+        "/api/payments/webhooks/flutterwave",
+        json={"event": "charge.completed"},
+        headers={"verif-hash": "mauvais-hash"},
+    )
+    assert response.status_code == 401
+
+
+def test_flutterwave_webhook_fulfills_order(client, fake_db, monkeypatch):
+    order_id = str(uuid.uuid4())
+    fake = fake_db(
+        {
+            "orders": [
+                {
+                    "id": order_id,
+                    "user_id": USER_ID,
+                    "status": "pending",
+                    "payment_method": "mobile_money",
+                    "total_amount": "69.00",
+                    "currency": "EUR",
+                    "created_at": "2026-07-05T10:00:00+00:00",
+                }
+            ],
+            "order_items": [{"order_id": order_id, "course_id": COURSE_ROW["id"]}],
+            "payments": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "order_id": order_id,
+                    "provider": "flutterwave",
+                    "provider_reference": order_id,
+                    "status": "pending",
+                    "amount": 45261,
+                    "currency": "XAF",
+                }
+            ],
+            "enrollments": [],
+        }
+    )
+    _flutterwave_settings(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.flutterwave_service.verify_transaction",
+        lambda _id: {"status": "successful", "tx_ref": order_id, "currency": "XAF", "amount": 45261},
+    )
+
+    response = client.post(
+        "/api/payments/webhooks/flutterwave",
+        json={
+            "event": "charge.completed",
+            "data": {"id": 12345, "tx_ref": order_id, "status": "successful", "amount": 45261, "currency": "XAF"},
+        },
+        headers={"verif-hash": "hash-secret"},
+    )
+    assert response.status_code == 200
+    assert fake.tables["orders"][0]["status"] == "paid"
+    assert fake.tables["payments"][0]["status"] == "succeeded"
+    assert fake.tables["enrollments"][0]["course_id"] == COURSE_ROW["id"]

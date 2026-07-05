@@ -14,12 +14,13 @@ import stripe as stripe_lib
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.core.rate_limit import limiter
-from app.db.supabase_client import get_service_client
+from app.db.supabase_client import get_service_client, get_user_email
 from app.dependencies import CurrentUser, get_current_user
 from app.routers.cart import _load_cart
+from app.core.config import get_settings
 from app.schemas.courses import OrderItemOut, OrderOut
 from app.schemas.payments import CheckoutRequest, CheckoutResponse
-from app.services import email_service, stripe_service
+from app.services import email_service, flutterwave_service, stripe_service
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +86,15 @@ def checkout(
     payload: CheckoutRequest,
     user: CurrentUser = Depends(get_current_user),
 ):
-    if payload.payment_method in ("paypal", "mobile_money"):
+    if payload.payment_method == "paypal":
         raise HTTPException(
             status.HTTP_501_NOT_IMPLEMENTED,
-            "Ce moyen de paiement sera bientôt disponible — utilisez la carte ou le cash",
+            "PayPal n'est pas disponible — utilisez la carte, le mobile money ou le cash",
+        )
+    if payload.payment_method == "mobile_money" and not get_settings().flutterwave_secret_key:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Le paiement mobile money n'est pas encore activé — utilisez la carte ou le cash",
         )
 
     cart = _load_cart(user.id)
@@ -138,6 +144,33 @@ def checkout(
             }
         ).execute()
         email_service.send_cash_order_pending(user.email, order["id"], cart.subtotal)
+    elif payload.payment_method == "mobile_money":
+        # Flutterwave encaisse en XAF (taux fixe CFA) ; la commande reste en EUR.
+        try:
+            redirect_url = flutterwave_service.create_payment_link(
+                tx_ref=order["id"],
+                amount_eur=cart.subtotal,
+                customer_email=user.email,
+                customer_name=user.full_name,
+                phone_number=payload.phone_number,
+            )
+        except Exception:
+            logger.exception("Création de paiement Flutterwave impossible (commande %s)", order["id"])
+            client.table("orders").update({"status": "failed"}).eq("id", order["id"]).execute()
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY,
+                "Paiement mobile money momentanément indisponible, réessayez plus tard",
+            )
+        client.table("payments").insert(
+            {
+                "order_id": order["id"],
+                "provider": "flutterwave",
+                "provider_reference": order["id"],  # tx_ref
+                "status": "pending",
+                "amount": flutterwave_service.eur_to_xaf(cart.subtotal),
+                "currency": "XAF",
+            }
+        ).execute()
     else:  # card → Stripe Checkout
         try:
             session = stripe_service.create_checkout_session(
@@ -230,13 +263,13 @@ async def stripe_webhook(request: Request):
             {"raw_payload": {"payment_intent": session.get("payment_intent"), "event": event_type}}
         ).eq("id", payment["id"]).execute()
         fulfill_order(order, provider="stripe")
-        # Email de confirmation (Brevo au module emailing)
-        if session.get("customer_details"):
-            email_service.send_payment_confirmed(
-                session["customer_details"].get("email") or "",
-                order["id"],
-                float(order.get("total_amount") or 0),
-            )
+        # Email de confirmation : email du compte, sinon celui saisi chez Stripe.
+        to_email = get_user_email(order["user_id"]) or (
+            (session.get("customer_details") or {}).get("email") or ""
+        )
+        email_service.send_payment_confirmed(
+            to_email, order["id"], float(order.get("total_amount") or 0)
+        )
 
     elif event_type in ("checkout.session.expired", "checkout.session.async_payment_failed"):
         session = event["data"]["object"]
@@ -268,4 +301,79 @@ async def stripe_webhook(request: Request):
                 ).execute()
                 logger.info("Commande %s remboursée — accès révoqués", payment["order_id"])
 
+    return {"received": True}
+
+
+# ── Webhook Flutterwave ──────────────────────────────────────────────────────
+
+
+def _find_flutterwave_payment(tx_ref: str) -> dict | None:
+    result = (
+        get_service_client()
+        .table("payments")
+        .select("id, order_id, status, amount")
+        .eq("provider", "flutterwave")
+        .eq("provider_reference", tx_ref)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+@router.post("/webhooks/flutterwave", status_code=status.HTTP_200_OK)
+async def flutterwave_webhook(request: Request):
+    settings = get_settings()
+    signature = request.headers.get("verif-hash", "")
+    if not settings.flutterwave_webhook_hash or signature != settings.flutterwave_webhook_hash:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Signature de webhook invalide")
+
+    event = await request.json()
+    if event.get("event") != "charge.completed":
+        return {"received": True}
+
+    data = event.get("data") or {}
+    tx_ref = data.get("tx_ref") or ""
+    payment = _find_flutterwave_payment(tx_ref)
+    if payment is None:
+        logger.warning("Webhook Flutterwave: tx_ref %s inconnu", tx_ref)
+        return {"received": True}
+    if payment["status"] == "succeeded":
+        return {"received": True}  # déjà traité (idempotence)
+
+    client = get_service_client()
+
+    if data.get("status") != "successful":
+        client.table("payments").update({"status": "failed"}).eq("id", payment["id"]).execute()
+        client.table("orders").update({"status": "failed"}).eq("id", payment["order_id"]).eq(
+            "status", "pending"
+        ).execute()
+        return {"received": True}
+
+    # Re-vérification systématique côté API : le payload seul ne fait pas foi.
+    try:
+        verified = flutterwave_service.verify_transaction(data.get("id"))
+    except Exception:
+        logger.exception("Vérification Flutterwave impossible (tx_ref %s)", tx_ref)
+        return {"received": True}  # Flutterwave rejouera le webhook
+
+    if (
+        verified.get("status") != "successful"
+        or verified.get("tx_ref") != tx_ref
+        or verified.get("currency") != "XAF"
+        or float(verified.get("amount") or 0) < float(payment.get("amount") or 0)
+    ):
+        logger.warning("Webhook Flutterwave: transaction %s incohérente, ignorée", tx_ref)
+        return {"received": True}
+
+    order = _get_order(payment["order_id"])
+    if order is None:
+        return {"received": True}
+
+    client.table("payments").update(
+        {"raw_payload": {"flw_transaction_id": data.get("id"), "event": "charge.completed"}}
+    ).eq("id", payment["id"]).execute()
+    fulfill_order(order, provider="flutterwave")
+    email_service.send_payment_confirmed(
+        get_user_email(order["user_id"]), order["id"], float(order.get("total_amount") or 0)
+    )
     return {"received": True}
