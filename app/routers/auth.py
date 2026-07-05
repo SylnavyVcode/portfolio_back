@@ -1,4 +1,6 @@
 import logging
+import secrets
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -14,6 +16,7 @@ from app.db.supabase_client import get_service_client, new_anon_client
 from app.services import email_service
 from app.dependencies import CurrentUser, get_current_user
 from app.schemas.auth import (
+    AvatarUpdateRequest,
     ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
@@ -28,12 +31,16 @@ from app.schemas.auth import (
     SessionResponse,
     UserPublic,
 )
+from app.schemas.blog import MediaSignRequest, MediaSignResponse
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-PROFILE_FIELDS = "full_name, role, date_of_birth, phone, address, city, country"
+PROFILE_FIELDS = "full_name, avatar_url, role, date_of_birth, phone, address, city, country"
+
+AVATAR_BUCKET = "avatars"
+AVATAR_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif", "avif"}
 
 
 def _fetch_profile(user_id: str) -> dict:
@@ -59,6 +66,7 @@ def _session_response(session, user) -> SessionResponse:
             email=user.email or "",
             name=profile.get("full_name") or (user.email or "").split("@")[0],
             role=profile.get("role", "user"),
+            avatar_url=profile.get("avatar_url"),
         ),
     )
 
@@ -203,7 +211,13 @@ def change_password(
 def me(user: CurrentUser = Depends(get_current_user)):
     profile = _fetch_profile(user.id)
     return MeResponse(
-        user=UserPublic(id=user.id, email=user.email, name=user.full_name, role=user.role),
+        user=UserPublic(
+            id=user.id,
+            email=user.email,
+            name=user.full_name,
+            role=user.role,
+            avatar_url=user.avatar_url,
+        ),
         profile=ProfilePublic(**{k: v for k, v in profile.items() if k != "role"}),
     )
 
@@ -221,6 +235,43 @@ def update_profile(
         get_service_client()
         .table("profiles")
         .update(values)
+        .eq("id", user.id)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Profil introuvable")
+    row = result.data[0]
+    return ProfilePublic(**{k: row.get(k) for k in ProfilePublic.model_fields})
+
+
+# ── Photo de profil ──────────────────────────────────────────────────────────
+
+
+@router.post("/me/avatar/sign", response_model=MediaSignResponse)
+def sign_avatar_upload(payload: MediaSignRequest, user: CurrentUser = Depends(get_current_user)):
+    ext = payload.filename.rsplit(".", 1)[-1].lower() if "." in payload.filename else ""
+    if not payload.content_type.startswith("image/") or ext not in AVATAR_EXTENSIONS:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Format non supporté — images uniquement (png, jpg, webp, gif, avif)",
+        )
+
+    path = f"{user.id}/{secrets.token_hex(4)}-{int(datetime.now(timezone.utc).timestamp())}.{ext}"
+    storage = get_service_client().storage.from_(AVATAR_BUCKET)
+    signed = storage.create_signed_upload_url(path)
+    return MediaSignResponse(
+        upload_url=signed["signed_url"],
+        path=path,
+        public_url=storage.get_public_url(path),
+    )
+
+
+@router.put("/me/avatar", response_model=ProfilePublic)
+def update_avatar(payload: AvatarUpdateRequest, user: CurrentUser = Depends(get_current_user)):
+    result = (
+        get_service_client()
+        .table("profiles")
+        .update({"avatar_url": payload.avatar_url})
         .eq("id", user.id)
         .execute()
     )

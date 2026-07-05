@@ -15,6 +15,7 @@ class CurrentUser:
     email: str
     role: str
     full_name: str
+    avatar_url: str | None
     access_token: str
 
     @property
@@ -38,7 +39,7 @@ def get_current_user(
     result = (
         get_service_client()
         .table("profiles")
-        .select("full_name, role")
+        .select("full_name, role, avatar_url")
         .eq("id", user_id)
         .single()
         .execute()
@@ -50,6 +51,7 @@ def get_current_user(
         email=claims.get("email", ""),
         role=profile.get("role", "user"),
         full_name=profile.get("full_name", ""),
+        avatar_url=profile.get("avatar_url"),
         access_token=credentials.credentials,
     )
 

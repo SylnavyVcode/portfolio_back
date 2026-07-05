@@ -44,6 +44,10 @@ class ProfileUpdateRequest(BaseModel):
     country: str | None = Field(default=None, max_length=100)
 
 
+class AvatarUpdateRequest(BaseModel):
+    avatar_url: str = Field(min_length=1, max_length=500)
+
+
 # ── Sorties ──────────────────────────────────────────────────────────────────
 
 class UserPublic(BaseModel):
@@ -51,10 +55,12 @@ class UserPublic(BaseModel):
     email: str
     name: str
     role: str = "user"
+    avatar_url: str | None = None
 
 
 class ProfilePublic(BaseModel):
     full_name: str = ""
+    avatar_url: str | None = None
     date_of_birth: date | None = None
     phone: str | None = None
     address: str | None = None

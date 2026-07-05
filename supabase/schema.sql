@@ -57,6 +57,7 @@ $$;
 create table public.profiles (
   id            uuid primary key references auth.users (id) on delete cascade,
   full_name     text not null default '',
+  avatar_url    text,
   role          text not null default 'user' check (role in ('user', 'admin')),
   date_of_birth date,
   phone         text,

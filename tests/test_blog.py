@@ -71,6 +71,7 @@ def override_user(client, role: str):
         email="test@example.com",
         role=role,
         full_name="Test",
+        avatar_url=None,
         access_token="fake",
     )
     return app
