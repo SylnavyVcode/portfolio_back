@@ -24,7 +24,14 @@ from app.routers.courses import (
 )
 from app.schemas.auth import MessageResponse
 from app.routers.payments import fulfill_order
-from app.schemas.blog import BlogPostAdmin, BlogPostCreate, BlogPostUpdate, LocalizedText
+from app.schemas.blog import (
+    BlogPostAdmin,
+    BlogPostCreate,
+    BlogPostUpdate,
+    LocalizedText,
+    MediaSignRequest,
+    MediaSignResponse,
+)
 from app.schemas.courses import (
     CourseCreate,
     CourseDetail,
@@ -163,6 +170,42 @@ def admin_delete_post(post_id: str):
     if not result.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Article introuvable")
     return MessageResponse(message="Article supprimé")
+
+
+# ── Médias (upload direct navigateur → Supabase Storage via URL signée) ─────
+
+MEDIA_BUCKET = "blog-media"
+
+# Extensions autorisées : le bucket est public, on n'y accepte que des
+# images et des vidéos lisibles par le navigateur.
+MEDIA_EXTENSIONS = {
+    "image": {"png", "jpg", "jpeg", "webp", "gif", "svg", "avif"},
+    "video": {"mp4", "webm", "ogg", "mov", "m4v"},
+}
+
+
+@router.post("/media/sign", response_model=MediaSignResponse)
+def admin_sign_media_upload(payload: MediaSignRequest):
+    kind = payload.content_type.split("/", 1)[0]
+    ext = payload.filename.rsplit(".", 1)[-1].lower() if "." in payload.filename else ""
+    if kind not in MEDIA_EXTENSIONS or ext not in MEDIA_EXTENSIONS[kind]:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Format non supporté — images (png, jpg, webp, gif, svg, avif) "
+            "ou vidéos (mp4, webm, ogg, mov, m4v) uniquement",
+        )
+
+    base = slugify(payload.filename.rsplit(".", 1)[0])[:60]
+    now = datetime.now(timezone.utc)
+    path = f"{now:%Y/%m}/{base}-{secrets.token_hex(4)}.{ext}"
+
+    storage = get_service_client().storage.from_(MEDIA_BUCKET)
+    signed = storage.create_signed_upload_url(path)
+    return MediaSignResponse(
+        upload_url=signed["signed_url"],
+        path=path,
+        public_url=storage.get_public_url(path),
+    )
 
 
 # ── Formations ───────────────────────────────────────────────────────────────

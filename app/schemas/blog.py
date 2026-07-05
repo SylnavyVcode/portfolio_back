@@ -69,3 +69,16 @@ class BlogPostUpdate(BaseModel):
     read_time: int | None = Field(default=None, ge=1, le=120)
     featured: bool | None = None
     status: str | None = Field(default=None, pattern=r"^(draft|published)$")
+
+
+# ── Médias (images / vidéos du contenu) ──────────────────────────────────────
+
+class MediaSignRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=200)
+    content_type: str = Field(min_length=1, max_length=100)
+
+
+class MediaSignResponse(BaseModel):
+    upload_url: str
+    path: str
+    public_url: str
