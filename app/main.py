@@ -2,7 +2,7 @@ import logging
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -44,6 +44,19 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 @app.get("/api/health", tags=["health"])
 def health():
     return {"status": "ok"}
+
+
+# Racine et favicon : évite les 404 dans les logs quand l'URL du
+# déploiement est ouverte dans un navigateur.
+@app.get("/", include_in_schema=False)
+def root():
+    return {"service": "Portfolio Valmy — API", "docs": "/api/docs", "health": "/api/health"}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+@app.get("/favicon.png", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
 
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
