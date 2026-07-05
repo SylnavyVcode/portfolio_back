@@ -20,7 +20,7 @@ from app.schemas.social import (
 
 router = APIRouter()
 
-COMMENT_COLUMNS = "id, content, created_at, user_id, profiles(full_name, avatar_url, role)"
+COMMENT_COLUMNS = "id, content, created_at, user_id, parent_id, profiles(full_name, avatar_url, role)"
 
 
 def _resolve_post_id(slug: str) -> str:
@@ -59,6 +59,7 @@ def _comment_out(row: dict) -> CommentOut:
         id=row["id"],
         content=row["content"],
         created_at=row["created_at"],
+        parent_id=row.get("parent_id"),
         author=CommentAuthor(
             id=row["user_id"],
             name=profile.get("full_name") or "",
@@ -86,10 +87,27 @@ def _add_comment(column: str, target_id: str, user: CurrentUser, payload: Commen
     if not content:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Commentaire vide")
 
+    # Réponse : le parent doit exister et appartenir à la même cible ; la
+    # profondeur est limitée à un niveau (répondre à une réponse rattache
+    # au commentaire racine).
+    parent_id = payload.parent_id
+    if parent_id:
+        parent = (
+            get_service_client()
+            .table("comments")
+            .select(f"id, parent_id, {column}")
+            .eq("id", parent_id)
+            .limit(1)
+            .execute()
+        )
+        if not parent.data or parent.data[0].get(column) != target_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Commentaire parent introuvable")
+        parent_id = parent.data[0].get("parent_id") or parent.data[0]["id"]
+
     result = (
         get_service_client()
         .table("comments")
-        .insert({"user_id": user.id, column: target_id, "content": content})
+        .insert({"user_id": user.id, column: target_id, "content": content, "parent_id": parent_id})
         .execute()
     )
     row = result.data[0]
@@ -97,6 +115,7 @@ def _add_comment(column: str, target_id: str, user: CurrentUser, payload: Commen
         id=row["id"],
         content=row["content"],
         created_at=row["created_at"],
+        parent_id=row.get("parent_id"),
         author=CommentAuthor(
             id=user.id, name=user.full_name, avatar_url=user.avatar_url, role=user.role
         ),
@@ -186,19 +205,19 @@ def set_course_rating(slug: str, payload: RatingSet, user: CurrentUser = Depends
     return _set_rating("course_id", _resolve_course_id(slug), user, payload)
 
 
-# ── Suppression (auteur ou admin) ────────────────────────────────────────────
+# ── Suppression (admin uniquement ; les réponses partent en cascade) ────────
 
 
 @router.delete("/comments/{comment_id}", response_model=MessageResponse)
 def delete_comment(comment_id: str, user: CurrentUser = Depends(get_current_user)):
+    if not user.is_admin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Seul un administrateur peut supprimer un commentaire"
+        )
     client = get_service_client()
-    existing = (
-        client.table("comments").select("id, user_id").eq("id", comment_id).limit(1).execute()
-    )
+    existing = client.table("comments").select("id").eq("id", comment_id).limit(1).execute()
     if not existing.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Commentaire introuvable")
-    if existing.data[0]["user_id"] != user.id and not user.is_admin:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Vous ne pouvez pas supprimer ce commentaire")
 
     client.table("comments").delete().eq("id", comment_id).execute()
     return MessageResponse(message="Commentaire supprimé")

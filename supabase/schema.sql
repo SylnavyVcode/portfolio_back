@@ -463,6 +463,8 @@ create table public.comments (
   user_id    uuid not null references public.profiles (id) on delete cascade,
   post_id    uuid references public.blog_posts (id) on delete cascade,
   course_id  uuid references public.courses (id) on delete cascade,
+  -- réponse à un commentaire racine (un seul niveau de profondeur)
+  parent_id  uuid references public.comments (id) on delete cascade,
   content    text not null check (char_length(content) between 1 and 2000),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -492,9 +494,9 @@ create policy "comments_update_own"
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
-create policy "comments_delete_own_or_admin"
+create policy "comments_delete_admin"
   on public.comments for delete
-  using (auth.uid() = user_id or public.is_admin());
+  using (public.is_admin());
 
 create table public.ratings (
   id         uuid primary key default gen_random_uuid(),

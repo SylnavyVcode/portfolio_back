@@ -17,10 +17,12 @@ class CommentOut(BaseModel):
     content: str
     created_at: datetime
     author: CommentAuthor
+    parent_id: str | None = None  # réponse à un commentaire racine
 
 
 class CommentCreate(BaseModel):
     content: str = Field(min_length=1, max_length=2000)
+    parent_id: str | None = None
 
 
 class RatingSummary(BaseModel):

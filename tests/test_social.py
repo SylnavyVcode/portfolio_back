@@ -18,6 +18,8 @@ COMMENT_ROW = {
     "content": "Très bon article !",
     "created_at": "2026-07-06T10:00:00+00:00",
     "user_id": USER_ID,
+    "parent_id": None,
+    "post_id": POST_ID,
     "profiles": {"full_name": "Test User", "avatar_url": None, "role": "user"},
 }
 
@@ -142,6 +144,16 @@ def test_add_comment_authenticated(client, fake_db):
     assert response.json()["author"]["id"] == USER_ID
 
 
+def test_reply_to_comment(client, fake_db):
+    fake_db({"blog_posts": [POST_ROW], "comments": [COMMENT_ROW]})
+    override_user()
+    response = client.post(
+        "/api/blog/react-best-practices/comments",
+        json={"content": "Merci !", "parent_id": COMMENT_ROW["id"]},
+    )
+    assert response.status_code == 201
+
+
 def test_add_comment_blank_rejected(client, fake_db):
     fake_db({"blog_posts": [POST_ROW]})
     override_user()
@@ -175,21 +187,15 @@ def test_set_rating_out_of_range(client, fake_db):
     assert response.status_code == 422
 
 
-# ── Suppression ──────────────────────────────────────────────────────────────
+# ── Suppression (admin uniquement) ───────────────────────────────────────────
 
 
-def test_delete_comment_not_owner(client, fake_db):
-    fake_db({"comments": [{"id": "c1", "user_id": OTHER_ID}]})
-    override_user(role="user")
-    response = client.delete("/api/comments/c1")
-    assert response.status_code == 403
-
-
-def test_delete_comment_owner(client, fake_db):
+def test_delete_comment_regular_user_forbidden(client, fake_db):
+    # Même l'auteur du commentaire ne peut pas le supprimer s'il n'est pas admin.
     fake_db({"comments": [{"id": "c1", "user_id": USER_ID}]})
     override_user(role="user")
     response = client.delete("/api/comments/c1")
-    assert response.status_code == 200
+    assert response.status_code == 403
 
 
 def test_delete_comment_admin(client, fake_db):
