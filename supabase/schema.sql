@@ -89,8 +89,10 @@ create trigger trg_on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
 
--- Anti-escalade : un utilisateur ne peut pas changer son propre rôle.
--- Seuls le back (service_role) ou un admin authentifié le peuvent.
+-- Anti-escalade : un utilisateur final ne peut pas changer son propre rôle.
+-- Autorisé quand il n'y a pas de contexte utilisateur (auth.uid() null :
+-- SQL Editor, migrations, back-end en service_role) ou quand l'appelant
+-- est déjà admin.
 create or replace function public.protect_role_change()
 returns trigger
 language plpgsql
@@ -99,7 +101,7 @@ set search_path = public
 as $$
 begin
   if new.role is distinct from old.role
-     and auth.role() is distinct from 'service_role'
+     and auth.uid() is not null
      and not public.is_admin() then
     raise exception 'Changement de rôle non autorisé';
   end if;

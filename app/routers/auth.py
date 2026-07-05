@@ -120,7 +120,10 @@ def login(request: Request, payload: LoginRequest):
 def refresh(payload: RefreshRequest):
     try:
         result = new_anon_client().auth.refresh_session(payload.refresh_token)
-    except AuthApiError:
+    except Exception:
+        # supabase-py lève des types variés selon le défaut du token
+        # (AuthApiError, AuthSessionMissingError, token malformé...) :
+        # dans tous les cas la session n'est pas renouvelable => 401.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session expirée, reconnectez-vous")
 
     if result.session is None or result.user is None:
