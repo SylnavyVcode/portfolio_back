@@ -15,7 +15,9 @@ class Settings(BaseSettings):
     # Application
     environment: str = "development"
     frontend_url: str = "http://localhost:5173"
-    cors_origins: str = "http://localhost:5173"
+    # Origines autorisées (CORS). La variable d'environnement CORS_ORIGINS
+    # a priorité ; le défaut couvre le dev local et le front en production.
+    cors_origins: str = "http://localhost:5173,https://portfolio-sv-nine.vercel.app"
 
     # Emailing (module 5)
     brevo_api_key: str = ""
