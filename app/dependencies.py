@@ -56,6 +56,19 @@ def get_current_user(
     )
 
 
+def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> CurrentUser | None:
+    """Utilisateur courant si un token est fourni, sinon None (accès public).
+
+    Un token présent mais invalide lève 401 : le front déclenche alors son
+    refresh automatique plutôt que d'afficher une page « anonyme » par erreur.
+    """
+    if credentials is None:
+        return None
+    return get_current_user(credentials)
+
+
 def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     if not user.is_admin:
         raise HTTPException(

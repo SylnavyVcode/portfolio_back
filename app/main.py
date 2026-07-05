@@ -8,7 +8,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
-from app.routers import admin, auth, blog, cart, courses, enrollments, payments
+from app.routers import admin, auth, blog, cart, courses, enrollments, payments, social
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("app")
@@ -65,4 +65,5 @@ app.include_router(courses.router, prefix="/api/courses", tags=["courses"])
 app.include_router(cart.router, prefix="/api/cart", tags=["cart"])
 app.include_router(enrollments.router, prefix="/api/me", tags=["me"])
 app.include_router(payments.router, prefix="/api/payments", tags=["payments"])
+app.include_router(social.router, prefix="/api", tags=["social"])
 app.include_router(admin.router, prefix="/api/admin", tags=["admin"])
