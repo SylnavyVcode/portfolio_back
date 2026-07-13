@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.db.supabase_client import get_service_client
 from app.dependencies import CurrentUser, get_current_user
-from app.routers.courses import COURSE_COLUMNS, course_row_to_summary
+from app.routers.courses import COURSE_COLUMNS, course_row_to_summary, progress_for_enrollment
 from app.schemas.courses import EnrollmentOut, OrderItemOut, OrderOut
 
 router = APIRouter()
@@ -36,7 +36,7 @@ def my_enrollments(user: CurrentUser = Depends(get_current_user)):
     result = (
         get_service_client()
         .table("enrollments")
-        .select(f"status, granted_at, courses({COURSE_COLUMNS})")
+        .select(f"id, status, granted_at, courses({COURSE_COLUMNS})")
         .eq("user_id", user.id)
         .eq("status", "active")
         .order("granted_at", desc=True)
@@ -47,6 +47,7 @@ def my_enrollments(user: CurrentUser = Depends(get_current_user)):
             course=course_row_to_summary(row["courses"]),
             status=row["status"],
             granted_at=row["granted_at"],
+            progress_percent=progress_for_enrollment(row["courses"]["id"], row["id"]).percent,
         )
         for row in (result.data or [])
         if row.get("courses")

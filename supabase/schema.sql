@@ -142,6 +142,7 @@ create table public.courses (
   summary_fr      text not null default '',
   summary_en      text not null default '',
   prerequisites   jsonb not null default '[]',         -- [{fr, en}, ...]
+  learning_objectives jsonb not null default '[]',     -- [{fr, en}, ...] — "ce que vous allez apprendre"
   preview         jsonb,                               -- {kind: code|dataset|runner, content}
   preview_label_fr text not null default '',
   preview_label_en text not null default '',
@@ -181,17 +182,67 @@ create policy "courses_admin_delete"
   using (public.is_admin());
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 3. COURSE_LESSONS — contenu structuré d'une formation
---    Le contenu complet n'est visible que par les inscrits (enrollment actif),
---    sauf leçons marquées "aperçu gratuit".
+-- 3. COURSE_SECTIONS — regroupe les leçons d'une formation (Section > Leçons,
+--    à l'image d'Udemy/OpenClassrooms/Coursera plutôt qu'une liste plate).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table public.course_sections (
+  id         uuid primary key default gen_random_uuid(),
+  course_id  uuid not null references public.courses (id) on delete cascade,
+  position   integer not null default 0,
+  title_fr   text not null,
+  title_en   text not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (course_id, position)
+);
+
+create index idx_sections_course on public.course_sections (course_id);
+
+create trigger trg_sections_updated_at
+  before update on public.course_sections
+  for each row execute function public.set_updated_at();
+
+alter table public.course_sections enable row level security;
+
+-- Visible dès lors que la formation elle-même l'est (le titre de section
+-- n'est pas un contenu sensible, contrairement au contenu des leçons).
+create policy "sections_select_course_visible"
+  on public.course_sections for select
+  using (
+    exists (
+      select 1 from public.courses c
+      where c.id = course_id and (c.is_published or public.is_admin())
+    )
+  );
+
+create policy "sections_admin_insert"
+  on public.course_sections for insert
+  with check (public.is_admin());
+
+create policy "sections_admin_update"
+  on public.course_sections for update
+  using (public.is_admin())
+  with check (public.is_admin());
+
+create policy "sections_admin_delete"
+  on public.course_sections for delete
+  using (public.is_admin());
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 4. COURSE_LESSONS — contenu structuré d'une formation, rattaché à une
+--    section. Le contenu complet n'est visible que par les inscrits
+--    (enrollment actif), sauf leçons marquées "aperçu gratuit".
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create table public.course_lessons (
   id               uuid primary key default gen_random_uuid(),
   course_id        uuid not null references public.courses (id) on delete cascade,
-  position         integer not null default 0,
+  section_id       uuid not null references public.course_sections (id) on delete cascade,
+  position         integer not null default 0,         -- relative à la section
   title_fr         text not null,
   title_en         text not null,
+  content_type     text not null default 'video' check (content_type in ('video', 'text', 'quiz')),
   content_fr       text,                               -- markdown
   content_en       text,
   video_url        text,
@@ -199,10 +250,11 @@ create table public.course_lessons (
   is_free_preview  boolean not null default false,
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now(),
-  unique (course_id, position)
+  unique (section_id, position)
 );
 
 create index idx_lessons_course on public.course_lessons (course_id);
+create index idx_lessons_section on public.course_lessons (section_id);
 
 create trigger trg_lessons_updated_at
   before update on public.course_lessons
@@ -248,7 +300,7 @@ create policy "lessons_admin_delete"
   using (public.is_admin());
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 4. CART_ITEMS — panier persistant côté serveur
+-- 5. CART_ITEMS — panier persistant côté serveur
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create table public.cart_items (
@@ -273,7 +325,7 @@ create policy "cart_delete_own"
   using (auth.uid() = user_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 5. ORDERS / ORDER_ITEMS — commandes
+-- 6. ORDERS / ORDER_ITEMS — commandes
 --    Statuts : pending (paiement en ligne en cours), pending_validation (cash),
 --              paid, failed, canceled, refunded.
 --    Écritures réservées au back-end (service_role) — aucune policy INSERT/
@@ -332,7 +384,7 @@ create policy "order_items_select_own_or_admin"
   );
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 6. PAYMENTS — transactions liées aux commandes
+-- 7. PAYMENTS — transactions liées aux commandes
 --    Écritures uniquement via le back (webhooks Stripe/PayPal/Flutterwave,
 --    validation cash par admin). Le client lit ses propres paiements.
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -377,7 +429,7 @@ create policy "payments_select_own_or_admin"
   );
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 7. ENROLLMENTS — qui a accès à quelle formation
+-- 8. ENROLLMENTS — qui a accès à quelle formation
 --    Créés par le back quand une commande passe à "paid".
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -403,7 +455,34 @@ create policy "enrollments_select_own_or_admin"
 -- Pas de policy INSERT/UPDATE/DELETE : réservé au back (service_role).
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 8. BLOG_POSTS — blog public avec brouillons
+-- 9. LESSON_PROGRESS — suivi de complétion apprenant (par inscription)
+-- ─────────────────────────────────────────────────────────────────────────────
+
+create table public.lesson_progress (
+  id            uuid primary key default gen_random_uuid(),
+  enrollment_id uuid not null references public.enrollments (id) on delete cascade,
+  lesson_id     uuid not null references public.course_lessons (id) on delete cascade,
+  completed_at  timestamptz not null default now(),
+  unique (enrollment_id, lesson_id)
+);
+
+create index idx_lesson_progress_enrollment on public.lesson_progress (enrollment_id);
+
+alter table public.lesson_progress enable row level security;
+
+create policy "lesson_progress_select_own_or_admin"
+  on public.lesson_progress for select
+  using (
+    exists (
+      select 1 from public.enrollments e
+      where e.id = enrollment_id and (e.user_id = auth.uid() or public.is_admin())
+    )
+  );
+
+-- Pas de policy INSERT/UPDATE/DELETE : réservé au back (service_role).
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 10. BLOG_POSTS — blog public avec brouillons
 -- ─────────────────────────────────────────────────────────────────────────────
 
 create table public.blog_posts (
@@ -453,7 +532,7 @@ create policy "blog_admin_delete"
   using (public.is_admin());
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 9. COMMENTS & RATINGS — commentaires et notes (blog + formations)
+-- 11. COMMENTS & RATINGS — commentaires et notes (blog + formations)
 --    Une note (1..5) par utilisateur et par cible ; la moyenne des notes
 --    d'une formation est resynchronisée dans courses.rating par trigger.
 -- ─────────────────────────────────────────────────────────────────────────────

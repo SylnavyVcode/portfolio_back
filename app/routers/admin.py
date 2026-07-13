@@ -19,8 +19,11 @@ from app.routers.blog import DETAIL_COLUMNS, row_to_detail
 from app.routers.courses import (
     COURSE_DETAIL_COLUMNS,
     LESSON_DETAIL_COLUMNS,
+    _localized_list,
     course_row_to_summary,
     lesson_row_to_detail,
+    section_row_to_out,
+    sections_with_lessons,
 )
 from app.schemas.auth import MessageResponse
 from app.routers.payments import fulfill_order
@@ -33,12 +36,17 @@ from app.schemas.blog import (
     MediaSignResponse,
 )
 from app.schemas.courses import (
+    AdminSectionWithLessons,
     CourseCreate,
     CourseDetail,
+    CourseSectionCreate,
+    CourseSectionOut,
+    CourseSectionUpdate,
     CourseUpdate,
     LessonCreate,
     LessonDetail,
     LessonUpdate,
+    MoveDirection,
     OrderItemOut,
 )
 from app.schemas.payments import AdminOrderOut
@@ -213,12 +221,12 @@ def admin_sign_media_upload(payload: MediaSignRequest):
 
 def _course_row_to_detail(row: dict) -> CourseDetail:
     summary = course_row_to_summary(row)
-    prerequisites = [
-        LocalizedText(fr=item.get("fr", ""), en=item.get("en", ""))
-        for item in (row.get("prerequisites") or [])
-        if isinstance(item, dict)
-    ]
-    return CourseDetail(**summary.model_dump(), prerequisites=prerequisites, preview=row.get("preview"))
+    return CourseDetail(
+        **summary.model_dump(),
+        prerequisites=_localized_list(row, "prerequisites"),
+        learning_objectives=_localized_list(row, "learning_objectives"),
+        preview=row.get("preview"),
+    )
 
 
 def _course_payload_to_columns(payload: CourseCreate | CourseUpdate) -> dict:
@@ -230,6 +238,8 @@ def _course_payload_to_columns(payload: CourseCreate | CourseUpdate) -> dict:
             values[f"{prefix}_en"] = data[field]["en"]
     if data.get("prerequisites") is not None:
         values["prerequisites"] = data["prerequisites"]
+    if data.get("learning_objectives") is not None:
+        values["learning_objectives"] = data["learning_objectives"]
     if "preview" in data:
         values["preview"] = data["preview"]
     if data.get("price") is not None:
@@ -315,6 +325,103 @@ def admin_delete_course(course_id: str):
     return MessageResponse(message="Formation supprimée")
 
 
+# ── Sections ─────────────────────────────────────────────────────────────────
+# Le programme d'une formation est organisé en sections, chacune contenant
+# ses leçons (au lieu d'une liste plate) — cf. benchmark Udemy/OpenClassrooms/
+# Coursera/FUN-MOOC.
+
+
+def _move_item(table: str, scope_column: str, item_id: str, direction: str) -> bool:
+    """Échange la position de `item_id` avec son voisin (au sein de la même
+    section pour une leçon, de la même formation pour une section).
+    Renvoie False si l'élément est déjà à l'extrémité (rien à faire)."""
+    client = get_service_client()
+    current = client.table(table).select(f"id, position, {scope_column}").eq("id", item_id).limit(1).execute()
+    if not current.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Élément introuvable")
+    cur = current.data[0]
+
+    neighbor_query = client.table(table).select("id, position").eq(scope_column, cur[scope_column])
+    if direction == "up":
+        neighbor_query = neighbor_query.lt("position", cur["position"]).order("position", desc=True)
+    else:
+        neighbor_query = neighbor_query.gt("position", cur["position"]).order("position", desc=False)
+    neighbor = neighbor_query.limit(1).execute()
+    if not neighbor.data:
+        return False
+    nb = neighbor.data[0]
+
+    # Passage par une position temporaire négative pour ne pas violer la
+    # contrainte unique (scope, position) le temps de l'échange.
+    client.table(table).update({"position": -1}).eq("id", item_id).execute()
+    client.table(table).update({"position": cur["position"]}).eq("id", nb["id"]).execute()
+    client.table(table).update({"position": nb["position"]}).eq("id", item_id).execute()
+    return True
+
+
+@router.get("/courses/{course_id}/sections", response_model=list[AdminSectionWithLessons])
+def admin_list_sections(course_id: str):
+    return [
+        AdminSectionWithLessons(**section)
+        for section in sections_with_lessons(course_id, LESSON_DETAIL_COLUMNS, lesson_row_to_detail)
+    ]
+
+
+@router.post(
+    "/courses/{course_id}/sections", response_model=CourseSectionOut, status_code=status.HTTP_201_CREATED
+)
+def admin_create_section(course_id: str, payload: CourseSectionCreate):
+    client = get_service_client()
+    course = client.table("courses").select("id").eq("id", course_id).limit(1).execute()
+    if not course.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Formation introuvable")
+
+    last = (
+        client.table("course_sections")
+        .select("position")
+        .eq("course_id", course_id)
+        .order("position", desc=True)
+        .limit(1)
+        .execute()
+    )
+    values = {
+        "course_id": course_id,
+        "title_fr": payload.title.fr,
+        "title_en": payload.title.en,
+        "position": (last.data[0]["position"] + 1) if last.data else 1,
+    }
+    result = client.table("course_sections").insert(values).execute()
+    return section_row_to_out(result.data[0])
+
+
+@router.put("/sections/{section_id}", response_model=CourseSectionOut)
+def admin_update_section(section_id: str, payload: CourseSectionUpdate):
+    values: dict = {}
+    if payload.title is not None:
+        values["title_fr"] = payload.title.fr
+        values["title_en"] = payload.title.en
+    if not values:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Aucun champ à mettre à jour")
+    result = get_service_client().table("course_sections").update(values).eq("id", section_id).execute()
+    if not result.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Section introuvable")
+    return section_row_to_out(result.data[0])
+
+
+@router.delete("/sections/{section_id}", response_model=MessageResponse)
+def admin_delete_section(section_id: str):
+    result = get_service_client().table("course_sections").delete().eq("id", section_id).execute()
+    if not result.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Section introuvable")
+    return MessageResponse(message="Section supprimée (avec ses leçons)")
+
+
+@router.post("/sections/{section_id}/move", response_model=MessageResponse)
+def admin_move_section(section_id: str, payload: MoveDirection):
+    moved = _move_item("course_sections", "course_id", section_id, payload.direction)
+    return MessageResponse(message="Ordre mis à jour" if moved else "Déjà à l'extrémité")
+
+
 # ── Leçons ───────────────────────────────────────────────────────────────────
 
 
@@ -327,40 +434,28 @@ def _lesson_payload_to_columns(payload: LessonCreate | LessonUpdate) -> dict:
     if data.get("content") is not None:
         values["content_fr"] = data["content"]["fr"]
         values["content_en"] = data["content"]["en"]
-    for field in ("video_url", "duration_minutes", "is_free_preview", "position"):
+    for field in ("content_type", "video_url", "duration_minutes", "is_free_preview", "position", "section_id"):
         if field in data and data[field] is not None:
             values[field] = data[field]
     return values
 
 
-@router.get("/courses/{course_id}/lessons", response_model=list[LessonDetail])
-def admin_list_lessons(course_id: str):
-    result = (
-        get_service_client()
-        .table("course_lessons")
-        .select(LESSON_DETAIL_COLUMNS)
-        .eq("course_id", course_id)
-        .order("position")
-        .execute()
-    )
-    return [lesson_row_to_detail(row) for row in (result.data or [])]
-
-
-@router.post("/courses/{course_id}/lessons", response_model=LessonDetail, status_code=status.HTTP_201_CREATED)
-def admin_create_lesson(course_id: str, payload: LessonCreate):
+@router.post("/sections/{section_id}/lessons", response_model=LessonDetail, status_code=status.HTTP_201_CREATED)
+def admin_create_lesson(section_id: str, payload: LessonCreate):
     client = get_service_client()
-    course = client.table("courses").select("id").eq("id", course_id).limit(1).execute()
-    if not course.data:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Formation introuvable")
+    section = client.table("course_sections").select("id, course_id").eq("id", section_id).limit(1).execute()
+    if not section.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Section introuvable")
 
     values = _lesson_payload_to_columns(payload)
-    values["course_id"] = course_id
+    values["section_id"] = section_id
+    values["course_id"] = section.data[0]["course_id"]
     if values.get("position") is None:
-        # Position par défaut : à la suite de la dernière leçon.
+        # Position par défaut : à la suite de la dernière leçon de la section.
         last = (
             client.table("course_lessons")
             .select("position")
-            .eq("course_id", course_id)
+            .eq("section_id", section_id)
             .order("position", desc=True)
             .limit(1)
             .execute()
@@ -378,11 +473,27 @@ def admin_create_lesson(course_id: str, payload: LessonCreate):
 
 @router.put("/lessons/{lesson_id}", response_model=LessonDetail)
 def admin_update_lesson(lesson_id: str, payload: LessonUpdate):
+    client = get_service_client()
     values = _lesson_payload_to_columns(payload)
     if not values:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Aucun champ à mettre à jour")
+
+    # Déplacement vers une autre section : on ignore une position fournie et
+    # on ajoute la leçon à la fin de la nouvelle section, pour éviter tout
+    # conflit avec les positions déjà occupées.
+    if "section_id" in values:
+        last = (
+            client.table("course_lessons")
+            .select("position")
+            .eq("section_id", values["section_id"])
+            .order("position", desc=True)
+            .limit(1)
+            .execute()
+        )
+        values["position"] = (last.data[0]["position"] + 1) if last.data else 1
+
     try:
-        result = get_service_client().table("course_lessons").update(values).eq("id", lesson_id).execute()
+        result = client.table("course_lessons").update(values).eq("id", lesson_id).execute()
     except APIError as exc:
         if exc.code == "23505":
             raise HTTPException(status.HTTP_409_CONFLICT, "Cette position est déjà occupée")
@@ -398,6 +509,12 @@ def admin_delete_lesson(lesson_id: str):
     if not result.data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Leçon introuvable")
     return MessageResponse(message="Leçon supprimée")
+
+
+@router.post("/lessons/{lesson_id}/move", response_model=MessageResponse)
+def admin_move_lesson(lesson_id: str, payload: MoveDirection):
+    moved = _move_item("course_lessons", "section_id", lesson_id, payload.direction)
+    return MessageResponse(message="Ordre mis à jour" if moved else "Déjà à l'extrémité")
 
 
 # ── Commandes (validation cash, annulation) ──────────────────────────────────

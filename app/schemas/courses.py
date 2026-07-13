@@ -6,6 +6,7 @@ from app.schemas.blog import LocalizedText
 
 THEME_PATTERN = r"^(web|python|data|testing)$"
 LEVEL_PATTERN = r"^(beginner|intermediate|advanced)$"
+CONTENT_TYPE_PATTERN = r"^(video|text|quiz)$"
 
 
 # ── Catalogue public ─────────────────────────────────────────────────────────
@@ -34,17 +35,42 @@ class LessonSummary(BaseModel):
     title: LocalizedText
     duration_minutes: int
     is_free_preview: bool
+    content_type: str = "video"
+
+
+class CourseSectionOut(BaseModel):
+    id: str
+    position: int
+    title: LocalizedText
+
+
+class CourseSectionWithLessons(CourseSectionOut):
+    lessons: list[LessonSummary] = Field(default_factory=list)
 
 
 class CourseDetail(CourseSummary):
     prerequisites: list[LocalizedText] = Field(default_factory=list)
+    learning_objectives: list[LocalizedText] = Field(default_factory=list)
     preview: dict | None = None
-    lessons: list[LessonSummary] = Field(default_factory=list)
+    sections: list[CourseSectionWithLessons] = Field(default_factory=list)
 
 
 class LessonDetail(LessonSummary):
     content: LocalizedText
     video_url: str | None = None
+
+
+class LessonSectionDetail(CourseSectionOut):
+    lessons: list[LessonDetail] = Field(default_factory=list)
+
+
+# ── Progression apprenant ────────────────────────────────────────────────────
+
+class CourseProgressOut(BaseModel):
+    completed_lesson_ids: list[str] = Field(default_factory=list)
+    total_lessons: int
+    completed_count: int
+    percent: float
 
 
 # ── Panier ───────────────────────────────────────────────────────────────────
@@ -70,6 +96,7 @@ class EnrollmentOut(BaseModel):
     course: CourseSummary
     status: str
     granted_at: datetime
+    progress_percent: float = 0.0
 
 
 class OrderItemOut(BaseModel):
@@ -97,6 +124,7 @@ class CourseCreate(BaseModel):
     level: str = Field(pattern=LEVEL_PATTERN)
     summary: LocalizedText = Field(default_factory=LocalizedText)
     prerequisites: list[LocalizedText] = Field(default_factory=list)
+    learning_objectives: list[LocalizedText] = Field(default_factory=list)
     preview: dict | None = None
     preview_label: LocalizedText = Field(default_factory=LocalizedText)
     price: float = Field(ge=0)
@@ -114,6 +142,7 @@ class CourseUpdate(BaseModel):
     level: str | None = Field(default=None, pattern=LEVEL_PATTERN)
     summary: LocalizedText | None = None
     prerequisites: list[LocalizedText] | None = None
+    learning_objectives: list[LocalizedText] | None = None
     preview: dict | None = None
     preview_label: LocalizedText | None = None
     price: float | None = Field(default=None, ge=0)
@@ -127,6 +156,7 @@ class CourseUpdate(BaseModel):
 class LessonCreate(BaseModel):
     title: LocalizedText
     content: LocalizedText = Field(default_factory=LocalizedText)
+    content_type: str = Field(default="video", pattern=CONTENT_TYPE_PATTERN)
     video_url: str | None = Field(default=None, max_length=500)
     duration_minutes: int = Field(default=0, ge=0, le=600)
     is_free_preview: bool = False
@@ -136,7 +166,25 @@ class LessonCreate(BaseModel):
 class LessonUpdate(BaseModel):
     title: LocalizedText | None = None
     content: LocalizedText | None = None
+    content_type: str | None = Field(default=None, pattern=CONTENT_TYPE_PATTERN)
     video_url: str | None = Field(default=None, max_length=500)
     duration_minutes: int | None = Field(default=None, ge=0, le=600)
     is_free_preview: bool | None = None
     position: int | None = Field(default=None, ge=0)
+    section_id: str | None = None
+
+
+class CourseSectionCreate(BaseModel):
+    title: LocalizedText
+
+
+class CourseSectionUpdate(BaseModel):
+    title: LocalizedText | None = None
+
+
+class AdminSectionWithLessons(CourseSectionOut):
+    lessons: list[LessonDetail] = Field(default_factory=list)
+
+
+class MoveDirection(BaseModel):
+    direction: str = Field(pattern=r"^(up|down)$")
